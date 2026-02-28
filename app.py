@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import json
 import os
+import re
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, Optional
-from urllib.error import HTTPError
-from urllib.parse import urlencode, urlparse
+from typing import Any, Dict, List, Optional
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -23,7 +25,14 @@ class FusionClient:
         if not self.token:
             raise FusionConfigError("Missing FUSION_TOKEN. Please set it in your environment.")
 
-    def _request(self, method: str, path: str, *, params: Optional[Dict[str, str]] = None, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Optional[Dict[str, str]] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         url = f"{self.base_url.rstrip('/')}/{path.lstrip('/')}"
         if params:
             url = f"{url}?{urlencode(params)}"
@@ -47,11 +56,11 @@ class FusionClient:
                 parsed = json.loads(body) if body else {}
             except json.JSONDecodeError:
                 parsed = {"message": body}
-            return {
-                "success": False,
-                "status": err.code,
-                "error": parsed,
-            }
+            return {"success": False, "status": err.code, "error": parsed}
+        except URLError as err:
+            return {"success": False, "status": 502, "error": {"message": str(err)}}
+        except Exception as err:  # noqa: BLE001
+            return {"success": False, "status": 500, "error": {"message": str(err)}}
 
     def list_records(self) -> Dict[str, Any]:
         return self._request(
@@ -87,6 +96,394 @@ class FusionClient:
         )
 
 
+def _safe_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return " ".join(_safe_text(item) for item in value)
+    if isinstance(value, dict):
+        return " ".join(_safe_text(v) for v in value.values())
+    return str(value).strip()
+
+
+def _extract_records(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    data = payload.get("data")
+    if isinstance(data, dict):
+        records = data.get("records")
+        if isinstance(records, list):
+            return records
+    records = payload.get("records")
+    return records if isinstance(records, list) else []
+
+
+def _get_field(fields: Dict[str, Any], candidates: List[str]) -> str:
+    lowered = {str(k).lower(): v for k, v in fields.items()}
+    for candidate in candidates:
+        if candidate in fields:
+            return _safe_text(fields.get(candidate))
+        lc = candidate.lower()
+        if lc in lowered:
+            return _safe_text(lowered.get(lc))
+    return ""
+
+
+def _parse_date(raw: Any) -> Optional[datetime]:
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        if raw > 10**12:
+            return datetime.fromtimestamp(raw / 1000)
+        return datetime.fromtimestamp(raw)
+
+    text = _safe_text(raw)
+    if not text:
+        return None
+
+    fmts = [
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%fZ",
+        "%Y-%m-%dT%H:%M:%SZ",
+    ]
+    for fmt in fmts:
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _tokenize(text: str) -> set:
+    pieces = re.findall(r"[\u4e00-\u9fff]|[a-zA-Z0-9]+", text.lower())
+    return {piece for piece in pieces if piece}
+
+
+def _similarity(a: str, b: str) -> float:
+    ta = _tokenize(a)
+    tb = _tokenize(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+def _summarize_issue(text: str) -> str:
+    clean = re.sub(r"\s+", " ", text).strip()
+    return clean[:40] + ("..." if len(clean) > 40 else "")
+
+
+def analyze_top_issues(
+    records: List[Dict[str, Any]],
+    *,
+    start_date: Optional[datetime],
+    end_date: Optional[datetime],
+    product_filter: str,
+    min_count: int,
+) -> Dict[str, Any]:
+    date_keys = ["问题接收日期", "接收日期", "日期", "创建时间", "createdAt", "CreatedAt"]
+    product_keys = ["产品线", "productLine", "产品", "业务线"]
+    platform_keys = ["所属端", "端", "平台", "app端"]
+    link_keys = ["工单链接", "链接", "ticketLink", "url"]
+    desc_keys = ["问题描述", "描述", "summary", "标题"]
+    progress_keys = ["处理进展", "进展", "处理状态"]
+    conclusion_keys = ["问题结论", "结论", "原因"]
+
+    normalized: List[Dict[str, Any]] = []
+    for record in records:
+        fields = record.get("fields") if isinstance(record.get("fields"), dict) else {}
+        received_date_raw = _get_field(fields, date_keys)
+        received_date = _parse_date(received_date_raw)
+        product_line = _get_field(fields, product_keys)
+        platform = _get_field(fields, platform_keys)
+        issue_text = " | ".join(
+            part for part in [
+                _get_field(fields, desc_keys),
+                _get_field(fields, progress_keys),
+                _get_field(fields, conclusion_keys),
+            ] if part
+        )
+        if not issue_text:
+            issue_text = json.dumps(fields, ensure_ascii=False)
+
+        ticket_link = _get_field(fields, link_keys)
+        if not ticket_link:
+            ticket_link = f"record:{record.get('recordId', '')}"
+
+        normalized.append(
+            {
+                "recordId": record.get("recordId", ""),
+                "fields": fields,
+                "receivedDate": received_date,
+                "receivedDateRaw": received_date_raw,
+                "productLine": product_line,
+                "platform": platform or "未知",
+                "ticketLink": ticket_link,
+                "issueText": issue_text,
+            }
+        )
+
+    product_filter_lc = product_filter.lower().strip()
+    filtered = []
+    for ticket in normalized:
+        ticket_date = ticket["receivedDate"]
+        if start_date and (not ticket_date or ticket_date.date() < start_date.date()):
+            continue
+        if end_date and (not ticket_date or ticket_date.date() > end_date.date()):
+            continue
+        if product_filter_lc and product_filter_lc not in ticket["productLine"].lower():
+            continue
+        filtered.append(ticket)
+
+    total = len(filtered)
+    clusters: List[Dict[str, Any]] = []
+    for ticket in filtered:
+        matched = None
+        for cluster in clusters:
+            if _similarity(ticket["issueText"], cluster["referenceText"]) >= 0.45:
+                matched = cluster
+                break
+
+        if not matched:
+            matched = {
+                "referenceText": ticket["issueText"],
+                "tickets": [],
+                "platformCounter": {},
+            }
+            clusters.append(matched)
+
+        matched["tickets"].append(ticket)
+        platform = ticket["platform"]
+        matched["platformCounter"][platform] = matched["platformCounter"].get(platform, 0) + 1
+
+    top_issues = []
+    for cluster in clusters:
+        count = len(cluster["tickets"])
+        if count < min_count:
+            continue
+        sample = cluster["tickets"][0]
+        ratio = (count / total * 100) if total else 0
+        top_issues.append(
+            {
+                "summary": _summarize_issue(sample["issueText"]),
+                "count": count,
+                "platform": ", ".join(
+                    f"{k}({v})" for k, v in sorted(cluster["platformCounter"].items(), key=lambda item: item[1], reverse=True)
+                ),
+                "ratioInFiltered": round(ratio, 2),
+                "ticketLinks": [ticket["ticketLink"] for ticket in cluster["tickets"]],
+                "recordIds": [ticket["recordId"] for ticket in cluster["tickets"]],
+            }
+        )
+
+    top_issues.sort(key=lambda item: item["count"], reverse=True)
+
+    return {
+        "filters": {
+            "startDate": start_date.strftime("%Y-%m-%d") if start_date else None,
+            "endDate": end_date.strftime("%Y-%m-%d") if end_date else None,
+            "productLine": product_filter,
+            "minCount": min_count,
+        },
+        "totalTicketsInScope": total,
+        "topIssues": top_issues,
+        "pieChart": {
+            "labels": [item["summary"] for item in top_issues],
+            "values": [item["count"] for item in top_issues],
+        },
+    }
+
+
+DASHBOARD_HTML = """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>线上工单分析台</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;margin:0;background:#f6f8fb;color:#222}
+    .container{max-width:1200px;margin:24px auto;padding:0 16px}
+    .card{background:#fff;border-radius:12px;padding:16px;margin-bottom:16px;box-shadow:0 2px 10px rgba(0,0,0,.05)}
+    h1,h2{margin:0 0 12px 0}
+    .row{display:flex;gap:12px;flex-wrap:wrap;align-items:end}
+    label{display:flex;flex-direction:column;font-size:13px;gap:6px}
+    input,textarea,button{font:inherit}
+    input,textarea{padding:8px;border:1px solid #ddd;border-radius:8px;min-width:180px}
+    textarea{min-height:90px;width:100%}
+    button{padding:8px 12px;border:none;border-radius:8px;background:#2563eb;color:white;cursor:pointer}
+    button.secondary{background:#475569}
+    table{width:100%;border-collapse:collapse;font-size:13px}
+    th,td{border-bottom:1px solid #edf2f7;padding:8px;text-align:left;vertical-align:top}
+    .muted{color:#64748b}
+    .grid{display:grid;grid-template-columns:2fr 1fr;gap:16px}
+    @media (max-width:900px){.grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>线上用户反馈工单系统（App 同步版）</h1>
+
+    <div class="card">
+      <h2>每周 Top 问题分析</h2>
+      <div class="row">
+        <label>开始日期<input id="startDate" type="date" /></label>
+        <label>结束日期<input id="endDate" type="date" /></label>
+        <label>产品线关键字<input id="productLine" value="online" placeholder="如 online / 大小班" /></label>
+        <label>最小工单数<input id="minCount" type="number" value="2" min="1" /></label>
+        <button onclick="loadTopIssues()">查询 Top 问题</button>
+      </div>
+      <p class="muted" id="scopeText"></p>
+      <div class="grid">
+        <div>
+          <table>
+            <thead><tr><th>简洁问题描述</th><th>工单数</th><th>所属端</th><th>占比(筛选范围)</th><th>工单链接</th></tr></thead>
+            <tbody id="topIssuesBody"></tbody>
+          </table>
+        </div>
+        <div><canvas id="issuesPie"></canvas></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>工单维护（直接同步 Fusion）</h2>
+      <div class="row">
+        <button onclick="loadTickets()" class="secondary">刷新工单</button>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <label style="flex:1">新增字段 JSON
+          <textarea id="createFields" placeholder='{"问题描述":"登录报错","产品线":"online课"}'></textarea>
+        </label>
+      </div>
+      <div class="row">
+        <button onclick="createTicket()">新增工单</button>
+      </div>
+      <hr style="margin:16px 0;border:none;border-top:1px solid #eef2f7" />
+      <div class="row">
+        <label>recordId<input id="updateRecordId" placeholder="recxxxx" /></label>
+      </div>
+      <div class="row" style="width:100%">
+        <label style="flex:1">更新字段 JSON
+          <textarea id="updateFields" placeholder='{"处理进展":"已修复"}'></textarea>
+        </label>
+      </div>
+      <div class="row">
+        <button onclick="updateTicket()">更新工单</button>
+        <button onclick="deleteTicket()" class="secondary">删除工单</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>工单列表</h2>
+      <table>
+        <thead><tr><th>recordId</th><th>产品线</th><th>问题接收日期</th><th>问题描述</th><th>所属端</th></tr></thead>
+        <tbody id="ticketsBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+<script>
+let pieChart;
+
+function todayOffset(days){
+  const d = new Date();
+  d.setDate(d.getDate()+days);
+  return d.toISOString().slice(0,10);
+}
+
+async function api(path, options={}) {
+  const res = await fetch(path, {headers:{'Content-Type':'application/json'}, ...options});
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.message || JSON.stringify(data));
+  return data;
+}
+
+async function loadTopIssues(){
+  const startDate = document.getElementById('startDate').value;
+  const endDate = document.getElementById('endDate').value;
+  const productLine = document.getElementById('productLine').value;
+  const minCount = document.getElementById('minCount').value || 2;
+  const params = new URLSearchParams({startDate,endDate,productLine,minCount});
+  const data = await api('/api/analytics/top-issues?'+params.toString());
+
+  document.getElementById('scopeText').textContent = `筛选范围工单总数: ${data.totalTicketsInScope}`;
+
+  const tbody = document.getElementById('topIssuesBody');
+  tbody.innerHTML = '';
+  data.topIssues.forEach(item => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${item.summary}</td><td>${item.count}</td><td>${item.platform}</td><td>${item.ratioInFiltered}%</td><td>${item.ticketLinks.map(link=>`<div>${link}</div>`).join('')}</td>`;
+    tbody.appendChild(tr);
+  });
+
+  const ctx = document.getElementById('issuesPie');
+  if (pieChart) pieChart.destroy();
+  pieChart = new Chart(ctx, {
+    type: 'pie',
+    data: {
+      labels: data.pieChart.labels,
+      datasets: [{ data: data.pieChart.values }]
+    }
+  });
+}
+
+async function loadTickets(){
+  const payload = await api('/api/tickets/normalized');
+  const tbody = document.getElementById('ticketsBody');
+  tbody.innerHTML = '';
+  payload.records.slice(0,200).forEach(t => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${t.recordId}</td><td>${t.productLine || ''}</td><td>${t.receivedDateRaw || ''}</td><td>${t.description || ''}</td><td>${t.platform || ''}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+function parseTextareaJson(id){
+  const value = document.getElementById(id).value.trim();
+  if (!value) return {};
+  return JSON.parse(value);
+}
+
+async function createTicket(){
+  const fields = parseTextareaJson('createFields');
+  await api('/api/tickets', {method:'POST', body: JSON.stringify({fields})});
+  await Promise.all([loadTickets(), loadTopIssues()]);
+}
+
+async function updateTicket(){
+  const recordId = document.getElementById('updateRecordId').value.trim();
+  if (!recordId) throw new Error('请填写 recordId');
+  const fields = parseTextareaJson('updateFields');
+  await api('/api/tickets/'+recordId, {method:'PATCH', body: JSON.stringify({fields})});
+  await Promise.all([loadTickets(), loadTopIssues()]);
+}
+
+async function deleteTicket(){
+  const recordId = document.getElementById('updateRecordId').value.trim();
+  if (!recordId) throw new Error('请填写 recordId');
+  await api('/api/tickets/'+recordId, {method:'DELETE'});
+  await Promise.all([loadTickets(), loadTopIssues()]);
+}
+
+window.addEventListener('load', async () => {
+  document.getElementById('startDate').value = todayOffset(-7);
+  document.getElementById('endDate').value = todayOffset(0);
+  try {
+    await Promise.all([loadTopIssues(), loadTickets()]);
+  } catch (e) {
+    alert('加载失败: '+e.message);
+  }
+});
+</script>
+</body>
+</html>
+"""
+
+
 class TicketAPIHandler(BaseHTTPRequestHandler):
     client: FusionClient
 
@@ -94,6 +491,14 @@ class TicketAPIHandler(BaseHTTPRequestHandler):
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _send_html(self, html: str) -> None:
+        data = html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -110,11 +515,55 @@ class TicketAPIHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path == "/":
+            self._send_html(DASHBOARD_HTML)
+            return
         if parsed.path == "/health":
             self._send(200, {"ok": True})
             return
         if parsed.path == "/api/tickets":
             self._send(200, self.client.list_records())
+            return
+        if parsed.path == "/api/tickets/normalized":
+            raw_payload = self.client.list_records()
+            records = _extract_records(raw_payload)
+            out = []
+            for record in records:
+                fields = record.get("fields") if isinstance(record.get("fields"), dict) else {}
+                out.append(
+                    {
+                        "recordId": record.get("recordId", ""),
+                        "productLine": _get_field(fields, ["产品线", "productLine", "产品", "业务线"]),
+                        "receivedDateRaw": _get_field(fields, ["问题接收日期", "接收日期", "日期", "创建时间"]),
+                        "description": _get_field(fields, ["问题描述", "描述", "summary", "标题"]),
+                        "platform": _get_field(fields, ["所属端", "端", "平台", "app端"]),
+                    }
+                )
+            self._send(200, {"records": out})
+            return
+        if parsed.path == "/api/analytics/top-issues":
+            query = parse_qs(parsed.query)
+            start_date = _parse_date(query.get("startDate", [""])[0])
+            end_date = _parse_date(query.get("endDate", [""])[0])
+            if end_date:
+                end_date = end_date + timedelta(hours=23, minutes=59, seconds=59)
+            product_line = query.get("productLine", ["online"])[0]
+            min_count_text = query.get("minCount", ["2"])[0]
+            try:
+                min_count = max(int(min_count_text), 1)
+            except ValueError:
+                min_count = 2
+
+            raw_payload = self.client.list_records()
+            records = _extract_records(raw_payload)
+            analysis = analyze_top_issues(
+                records,
+                start_date=start_date,
+                end_date=end_date,
+                product_filter=product_line,
+                min_count=min_count,
+            )
+            self._send(200, analysis)
             return
         self._send(404, {"message": "Not found"})
 
@@ -163,7 +612,7 @@ def run() -> None:
     TicketAPIHandler.client = client
 
     server = ThreadingHTTPServer((host, port), TicketAPIHandler)
-    print(f"Ticket sync API running at http://{host}:{port}")
+    print(f"Ticket app running at http://{host}:{port}")
     server.serve_forever()
 
 
