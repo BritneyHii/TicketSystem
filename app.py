@@ -307,21 +307,25 @@ DASHBOARD_HTML = """<!doctype html>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
     body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;margin:0;background:#f6f8fb;color:#222}
-    .container{max-width:1200px;margin:24px auto;padding:0 16px}
+    .container{max-width:1280px;margin:24px auto;padding:0 16px}
     .card{background:#fff;border-radius:12px;padding:16px;margin-bottom:16px;box-shadow:0 2px 10px rgba(0,0,0,.05)}
-    h1,h2{margin:0 0 12px 0}
+    h1,h2,h3{margin:0 0 12px 0}
     .row{display:flex;gap:12px;flex-wrap:wrap;align-items:end}
+    .grid{display:grid;grid-template-columns:2fr 1fr;gap:16px}
+    .grid-form{display:grid;grid-template-columns:repeat(3,minmax(220px,1fr));gap:10px}
+    @media (max-width:1000px){.grid,.grid-form{grid-template-columns:1fr}}
     label{display:flex;flex-direction:column;font-size:13px;gap:6px}
-    input,textarea,button{font:inherit}
-    input,textarea{padding:8px;border:1px solid #ddd;border-radius:8px;min-width:180px}
-    textarea{min-height:90px;width:100%}
+    input,textarea,button,select{font:inherit}
+    input,textarea,select{padding:8px;border:1px solid #ddd;border-radius:8px}
+    textarea{min-height:80px}
     button{padding:8px 12px;border:none;border-radius:8px;background:#2563eb;color:white;cursor:pointer}
     button.secondary{background:#475569}
+    button.danger{background:#dc2626}
     table{width:100%;border-collapse:collapse;font-size:13px}
     th,td{border-bottom:1px solid #edf2f7;padding:8px;text-align:left;vertical-align:top}
     .muted{color:#64748b}
-    .grid{display:grid;grid-template-columns:2fr 1fr;gap:16px}
-    @media (max-width:900px){.grid{grid-template-columns:1fr}}
+    .actions{display:flex;gap:8px;flex-wrap:wrap}
+    .pill{padding:2px 8px;border-radius:999px;background:#e2e8f0;color:#334155;font-size:12px}
   </style>
 </head>
 <body>
@@ -350,37 +354,63 @@ DASHBOARD_HTML = """<!doctype html>
     </div>
 
     <div class="card">
-      <h2>工单维护（直接同步 Fusion）</h2>
-      <div class="row">
-        <button onclick="loadTickets()" class="secondary">刷新工单</button>
-      </div>
-      <div class="row" style="margin-top:10px">
-        <label style="flex:1">新增字段 JSON
-          <textarea id="createFields" placeholder='{"问题描述":"登录报错","产品线":"online课"}'></textarea>
+      <h2>工单维护（更友好录入）</h2>
+      <p class="muted">不需要再手动填写 JSON 或 recordId。先填表单，点击保存即可；如需修改，点下方工单行的“编辑”。</p>
+      <div class="grid-form">
+        <label>问题接收日期<input id="fDate" type="date" /></label>
+        <label>产品线
+          <select id="fProductLine">
+            <option value="online课">online课</option>
+            <option value="大小班">大小班</option>
+            <option value="其它">其它</option>
+          </select>
         </label>
-      </div>
-      <div class="row">
-        <button onclick="createTicket()">新增工单</button>
-      </div>
-      <hr style="margin:16px 0;border:none;border-top:1px solid #eef2f7" />
-      <div class="row">
-        <label>recordId<input id="updateRecordId" placeholder="recxxxx" /></label>
-      </div>
-      <div class="row" style="width:100%">
-        <label style="flex:1">更新字段 JSON
-          <textarea id="updateFields" placeholder='{"处理进展":"已修复"}'></textarea>
+        <label>所属端
+          <select id="fPlatform">
+            <option value="学生端">学生端</option>
+            <option value="老师端">老师端</option>
+            <option value="管理后台">管理后台</option>
+            <option value="其它">其它</option>
+          </select>
         </label>
+        <label>优先级
+          <select id="fPriority">
+            <option value="高">高</option>
+            <option value="中" selected>中</option>
+            <option value="低">低</option>
+          </select>
+        </label>
+        <label>状态
+          <select id="fStatus">
+            <option value="待处理">待处理</option>
+            <option value="处理中">处理中</option>
+            <option value="已解决">已解决</option>
+            <option value="已关闭">已关闭</option>
+          </select>
+        </label>
+        <label>工单链接<input id="fLink" placeholder="https://..." /></label>
       </div>
-      <div class="row">
-        <button onclick="updateTicket()">更新工单</button>
-        <button onclick="deleteTicket()" class="secondary">删除工单</button>
+      <div style="margin-top:10px">
+        <label>问题描述<textarea id="fDescription" placeholder="请简要描述用户反馈的问题现象"></textarea></label>
+      </div>
+      <div style="margin-top:10px">
+        <label>处理进展<textarea id="fProgress" placeholder="当前排查过程 / 已做动作"></textarea></label>
+      </div>
+      <div style="margin-top:10px">
+        <label>问题结论<textarea id="fConclusion" placeholder="根因 / 结论（可暂空）"></textarea></label>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <span class="pill" id="editState">当前：新增模式</span>
+        <button onclick="saveTicket()">保存工单</button>
+        <button onclick="resetForm()" class="secondary">清空表单</button>
+        <button onclick="loadTickets()" class="secondary">刷新工单列表</button>
       </div>
     </div>
 
     <div class="card">
       <h2>工单列表</h2>
       <table>
-        <thead><tr><th>recordId</th><th>产品线</th><th>问题接收日期</th><th>问题描述</th><th>所属端</th></tr></thead>
+        <thead><tr><th>日期</th><th>产品线</th><th>描述</th><th>所属端</th><th>状态</th><th>操作</th></tr></thead>
         <tbody id="ticketsBody"></tbody>
       </table>
     </div>
@@ -388,6 +418,8 @@ DASHBOARD_HTML = """<!doctype html>
 
 <script>
 let pieChart;
+let ticketsCache = [];
+let editingRecordId = null;
 
 function todayOffset(days){
   const d = new Date();
@@ -399,7 +431,83 @@ async function api(path, options={}) {
   const res = await fetch(path, {headers:{'Content-Type':'application/json'}, ...options});
   const data = await res.json();
   if (!res.ok) throw new Error(data.message || JSON.stringify(data));
+  if (data && data.success === false && data.error) throw new Error(data.error.message || JSON.stringify(data.error));
   return data;
+}
+
+function safe(v){ return (v ?? '').toString(); }
+
+function collectFormFields(){
+  return {
+    '问题接收日期': document.getElementById('fDate').value,
+    '产品线': document.getElementById('fProductLine').value,
+    '所属端': document.getElementById('fPlatform').value,
+    '优先级': document.getElementById('fPriority').value,
+    '状态': document.getElementById('fStatus').value,
+    '工单链接': document.getElementById('fLink').value.trim(),
+    '问题描述': document.getElementById('fDescription').value.trim(),
+    '处理进展': document.getElementById('fProgress').value.trim(),
+    '问题结论': document.getElementById('fConclusion').value.trim(),
+  };
+}
+
+function fillForm(ticket){
+  document.getElementById('fDate').value = safe(ticket.receivedDateRaw).slice(0,10);
+  document.getElementById('fProductLine').value = safe(ticket.productLine || '其它');
+  document.getElementById('fPlatform').value = safe(ticket.platform || '其它');
+  document.getElementById('fPriority').value = safe(ticket.priority || '中');
+  document.getElementById('fStatus').value = safe(ticket.status || '待处理');
+  document.getElementById('fLink').value = safe(ticket.ticketLink);
+  document.getElementById('fDescription').value = safe(ticket.description);
+  document.getElementById('fProgress').value = safe(ticket.progress);
+  document.getElementById('fConclusion').value = safe(ticket.conclusion);
+}
+
+function resetForm(){
+  editingRecordId = null;
+  document.getElementById('editState').textContent = '当前：新增模式';
+  document.getElementById('fDate').value = todayOffset(0);
+  document.getElementById('fProductLine').value = 'online课';
+  document.getElementById('fPlatform').value = '学生端';
+  document.getElementById('fPriority').value = '中';
+  document.getElementById('fStatus').value = '待处理';
+  document.getElementById('fLink').value = '';
+  document.getElementById('fDescription').value = '';
+  document.getElementById('fProgress').value = '';
+  document.getElementById('fConclusion').value = '';
+}
+
+async function saveTicket(){
+  const fields = collectFormFields();
+  if (!fields['问题描述']) {
+    alert('请先填写问题描述');
+    return;
+  }
+
+  if (editingRecordId) {
+    await api('/api/tickets/'+editingRecordId, {method:'PATCH', body: JSON.stringify({fields})});
+  } else {
+    await api('/api/tickets', {method:'POST', body: JSON.stringify({fields})});
+  }
+
+  await Promise.all([loadTickets(), loadTopIssues()]);
+  resetForm();
+}
+
+function onEdit(recordId){
+  const ticket = ticketsCache.find(t => t.recordId === recordId);
+  if (!ticket) return;
+  editingRecordId = recordId;
+  document.getElementById('editState').textContent = '当前：编辑模式（已选中1条工单）';
+  fillForm(ticket);
+  window.scrollTo({top: document.body.scrollHeight * 0.25, behavior: 'smooth'});
+}
+
+async function onDelete(recordId){
+  if (!confirm('确认删除这条工单？')) return;
+  await api('/api/tickets/'+recordId, {method:'DELETE'});
+  await Promise.all([loadTickets(), loadTopIssues()]);
+  if (editingRecordId === recordId) resetForm();
 }
 
 async function loadTopIssues(){
@@ -433,45 +541,31 @@ async function loadTopIssues(){
 
 async function loadTickets(){
   const payload = await api('/api/tickets/normalized');
+  ticketsCache = payload.records || [];
   const tbody = document.getElementById('ticketsBody');
   tbody.innerHTML = '';
-  payload.records.slice(0,200).forEach(t => {
+  ticketsCache.slice(0,300).forEach(t => {
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${t.recordId}</td><td>${t.productLine || ''}</td><td>${t.receivedDateRaw || ''}</td><td>${t.description || ''}</td><td>${t.platform || ''}</td>`;
+    tr.innerHTML = `
+      <td>${safe(t.receivedDateRaw).slice(0,10)}</td>
+      <td>${safe(t.productLine)}</td>
+      <td>${safe(t.description)}</td>
+      <td>${safe(t.platform)}</td>
+      <td>${safe(t.status)}</td>
+      <td>
+        <div class="actions">
+          <button class="secondary" onclick="onEdit('${safe(t.recordId)}')">编辑</button>
+          <button class="danger" onclick="onDelete('${safe(t.recordId)}')">删除</button>
+        </div>
+      </td>`;
     tbody.appendChild(tr);
   });
-}
-
-function parseTextareaJson(id){
-  const value = document.getElementById(id).value.trim();
-  if (!value) return {};
-  return JSON.parse(value);
-}
-
-async function createTicket(){
-  const fields = parseTextareaJson('createFields');
-  await api('/api/tickets', {method:'POST', body: JSON.stringify({fields})});
-  await Promise.all([loadTickets(), loadTopIssues()]);
-}
-
-async function updateTicket(){
-  const recordId = document.getElementById('updateRecordId').value.trim();
-  if (!recordId) throw new Error('请填写 recordId');
-  const fields = parseTextareaJson('updateFields');
-  await api('/api/tickets/'+recordId, {method:'PATCH', body: JSON.stringify({fields})});
-  await Promise.all([loadTickets(), loadTopIssues()]);
-}
-
-async function deleteTicket(){
-  const recordId = document.getElementById('updateRecordId').value.trim();
-  if (!recordId) throw new Error('请填写 recordId');
-  await api('/api/tickets/'+recordId, {method:'DELETE'});
-  await Promise.all([loadTickets(), loadTopIssues()]);
 }
 
 window.addEventListener('load', async () => {
   document.getElementById('startDate').value = todayOffset(-7);
   document.getElementById('endDate').value = todayOffset(0);
+  resetForm();
   try {
     await Promise.all([loadTopIssues(), loadTickets()]);
   } catch (e) {
@@ -537,6 +631,11 @@ class TicketAPIHandler(BaseHTTPRequestHandler):
                         "receivedDateRaw": _get_field(fields, ["问题接收日期", "接收日期", "日期", "创建时间"]),
                         "description": _get_field(fields, ["问题描述", "描述", "summary", "标题"]),
                         "platform": _get_field(fields, ["所属端", "端", "平台", "app端"]),
+                        "status": _get_field(fields, ["状态", "status"]),
+                        "priority": _get_field(fields, ["优先级", "priority"]),
+                        "progress": _get_field(fields, ["处理进展", "进展", "处理状态"]),
+                        "conclusion": _get_field(fields, ["问题结论", "结论", "原因"]),
+                        "ticketLink": _get_field(fields, ["工单链接", "链接", "ticketLink", "url"]),
                     }
                 )
             self._send(200, {"records": out})
