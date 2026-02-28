@@ -47,7 +47,9 @@ python3 app.py
 
 - 友好表单录入（不需要手写 JSON）
 - 工单列表行内“编辑/删除”（不需要手动输入 recordId）
-- 支持录入：问题接收日期、产品线、所属端、优先级、状态、问题描述、处理进展、问题结论、工单链接
+- 支持录入：问题接收日期、产品线、所属端、优先级、状态、问题描述、处理进展、问题结论
+- 创建时自动新增工单，不需要手填工单链接
+- 点击工单行可打开“工单详情”，并可一键跳转外部工单链接（如果该工单已有链接）
 - 保存后自动同步到 Fusion
 
 ### 每周 Top 问题分析
@@ -82,6 +84,7 @@ python3 app.py
 - `GET /health`：健康检查
 - `GET /api/tickets`：读取 Fusion 原始工单
 - `GET /api/tickets/normalized`：读取标准化后的工单关键字段
+- `GET /api/tickets/:recordId`：读取单条工单详情（用于详情面板）
 - `POST /api/tickets`：新增工单
 - `PATCH /api/tickets/:recordId`：更新工单
 - `DELETE /api/tickets/:recordId`：删除工单

@@ -298,6 +298,23 @@ def analyze_top_issues(
     }
 
 
+def _normalize_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    fields = record.get("fields") if isinstance(record.get("fields"), dict) else {}
+    return {
+        "recordId": record.get("recordId", ""),
+        "fields": fields,
+        "productLine": _get_field(fields, ["产品线", "productLine", "产品", "业务线"]),
+        "receivedDateRaw": _get_field(fields, ["问题接收日期", "接收日期", "日期", "创建时间"]),
+        "description": _get_field(fields, ["问题描述", "描述", "summary", "标题"]),
+        "platform": _get_field(fields, ["所属端", "端", "平台", "app端"]),
+        "status": _get_field(fields, ["状态", "status"]),
+        "priority": _get_field(fields, ["优先级", "priority"]),
+        "progress": _get_field(fields, ["处理进展", "进展", "处理状态"]),
+        "conclusion": _get_field(fields, ["问题结论", "结论", "原因"]),
+        "ticketLink": _get_field(fields, ["工单链接", "链接", "ticketLink", "url"]),
+    }
+
+
 DASHBOARD_HTML = """<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -309,7 +326,7 @@ DASHBOARD_HTML = """<!doctype html>
     body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;margin:0;background:#f6f8fb;color:#222}
     .container{max-width:1280px;margin:24px auto;padding:0 16px}
     .card{background:#fff;border-radius:12px;padding:16px;margin-bottom:16px;box-shadow:0 2px 10px rgba(0,0,0,.05)}
-    h1,h2,h3{margin:0 0 12px 0}
+    h1,h2{margin:0 0 12px 0}
     .row{display:flex;gap:12px;flex-wrap:wrap;align-items:end}
     .grid{display:grid;grid-template-columns:2fr 1fr;gap:16px}
     .grid-form{display:grid;grid-template-columns:repeat(3,minmax(220px,1fr));gap:10px}
@@ -323,9 +340,12 @@ DASHBOARD_HTML = """<!doctype html>
     button.danger{background:#dc2626}
     table{width:100%;border-collapse:collapse;font-size:13px}
     th,td{border-bottom:1px solid #edf2f7;padding:8px;text-align:left;vertical-align:top}
+    tr.clickable:hover{background:#f8fafc;cursor:pointer}
     .muted{color:#64748b}
     .actions{display:flex;gap:8px;flex-wrap:wrap}
     .pill{padding:2px 8px;border-radius:999px;background:#e2e8f0;color:#334155;font-size:12px}
+    .detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .detail-box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px}
   </style>
 </head>
 <body>
@@ -354,8 +374,8 @@ DASHBOARD_HTML = """<!doctype html>
     </div>
 
     <div class="card">
-      <h2>工单维护（更友好录入）</h2>
-      <p class="muted">不需要再手动填写 JSON 或 recordId。先填表单，点击保存即可；如需修改，点下方工单行的“编辑”。</p>
+      <h2>工单维护（友好录入）</h2>
+      <p class="muted">工单创建时会自动新增，不需要你填写工单链接。链接会在“工单详情”里自动展示（如果表里已有链接）。</p>
       <div class="grid-form">
         <label>问题接收日期<input id="fDate" type="date" /></label>
         <label>产品线
@@ -388,31 +408,42 @@ DASHBOARD_HTML = """<!doctype html>
             <option value="已关闭">已关闭</option>
           </select>
         </label>
-        <label>工单链接<input id="fLink" placeholder="https://..." /></label>
       </div>
-      <div style="margin-top:10px">
-        <label>问题描述<textarea id="fDescription" placeholder="请简要描述用户反馈的问题现象"></textarea></label>
-      </div>
-      <div style="margin-top:10px">
-        <label>处理进展<textarea id="fProgress" placeholder="当前排查过程 / 已做动作"></textarea></label>
-      </div>
-      <div style="margin-top:10px">
-        <label>问题结论<textarea id="fConclusion" placeholder="根因 / 结论（可暂空）"></textarea></label>
-      </div>
+      <div style="margin-top:10px"><label>问题描述<textarea id="fDescription" placeholder="请简要描述用户反馈的问题现象"></textarea></label></div>
+      <div style="margin-top:10px"><label>处理进展<textarea id="fProgress" placeholder="当前排查过程 / 已做动作"></textarea></label></div>
+      <div style="margin-top:10px"><label>问题结论<textarea id="fConclusion" placeholder="根因 / 结论（可暂空）"></textarea></label></div>
       <div class="row" style="margin-top:12px">
-        <span class="pill" id="editState">当前：新增模式</span>
+        <span class="pill" id="editState">当前：新增模式（用于新建工单）</span>
         <button onclick="saveTicket()">保存工单</button>
-        <button onclick="resetForm()" class="secondary">清空表单</button>
+        <button onclick="resetForm()" class="secondary">切回新增模式</button>
         <button onclick="loadTickets()" class="secondary">刷新工单列表</button>
       </div>
     </div>
 
     <div class="card">
-      <h2>工单列表</h2>
+      <h2>工单列表（点击行可看详情）</h2>
       <table>
         <thead><tr><th>日期</th><th>产品线</th><th>描述</th><th>所属端</th><th>状态</th><th>操作</th></tr></thead>
         <tbody id="ticketsBody"></tbody>
       </table>
+    </div>
+
+    <div class="card" id="detailCard" style="display:none">
+      <h2>工单详情</h2>
+      <div class="detail-grid">
+        <div class="detail-box"><strong>recordId</strong><div id="dRecordId" class="muted"></div></div>
+        <div class="detail-box"><strong>工单链接</strong><div id="dLink" class="muted"></div></div>
+        <div class="detail-box"><strong>问题接收日期</strong><div id="dDate" class="muted"></div></div>
+        <div class="detail-box"><strong>产品线 / 所属端</strong><div id="dMeta" class="muted"></div></div>
+        <div class="detail-box"><strong>状态 / 优先级</strong><div id="dState" class="muted"></div></div>
+        <div class="detail-box" style="grid-column:1/-1"><strong>问题描述</strong><div id="dDesc" class="muted"></div></div>
+        <div class="detail-box" style="grid-column:1/-1"><strong>处理进展</strong><div id="dProgress" class="muted"></div></div>
+        <div class="detail-box" style="grid-column:1/-1"><strong>问题结论</strong><div id="dConclusion" class="muted"></div></div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="secondary" id="openExternalBtn" onclick="openExternalTicket()">打开工单链接</button>
+        <button onclick="editFromDetail()">编辑这条工单</button>
+      </div>
     </div>
   </div>
 
@@ -420,6 +451,7 @@ DASHBOARD_HTML = """<!doctype html>
 let pieChart;
 let ticketsCache = [];
 let editingRecordId = null;
+let currentDetail = null;
 
 function todayOffset(days){
   const d = new Date();
@@ -436,6 +468,7 @@ async function api(path, options={}) {
 }
 
 function safe(v){ return (v ?? '').toString(); }
+function isExternalUrl(v){ return /^https?:\/\//i.test(safe(v)); }
 
 function collectFormFields(){
   return {
@@ -444,7 +477,6 @@ function collectFormFields(){
     '所属端': document.getElementById('fPlatform').value,
     '优先级': document.getElementById('fPriority').value,
     '状态': document.getElementById('fStatus').value,
-    '工单链接': document.getElementById('fLink').value.trim(),
     '问题描述': document.getElementById('fDescription').value.trim(),
     '处理进展': document.getElementById('fProgress').value.trim(),
     '问题结论': document.getElementById('fConclusion').value.trim(),
@@ -457,7 +489,6 @@ function fillForm(ticket){
   document.getElementById('fPlatform').value = safe(ticket.platform || '其它');
   document.getElementById('fPriority').value = safe(ticket.priority || '中');
   document.getElementById('fStatus').value = safe(ticket.status || '待处理');
-  document.getElementById('fLink').value = safe(ticket.ticketLink);
   document.getElementById('fDescription').value = safe(ticket.description);
   document.getElementById('fProgress').value = safe(ticket.progress);
   document.getElementById('fConclusion').value = safe(ticket.conclusion);
@@ -465,13 +496,12 @@ function fillForm(ticket){
 
 function resetForm(){
   editingRecordId = null;
-  document.getElementById('editState').textContent = '当前：新增模式';
+  document.getElementById('editState').textContent = '当前：新增模式（用于新建工单）';
   document.getElementById('fDate').value = todayOffset(0);
   document.getElementById('fProductLine').value = 'online课';
   document.getElementById('fPlatform').value = '学生端';
   document.getElementById('fPriority').value = '中';
   document.getElementById('fStatus').value = '待处理';
-  document.getElementById('fLink').value = '';
   document.getElementById('fDescription').value = '';
   document.getElementById('fProgress').value = '';
   document.getElementById('fConclusion').value = '';
@@ -498,9 +528,9 @@ function onEdit(recordId){
   const ticket = ticketsCache.find(t => t.recordId === recordId);
   if (!ticket) return;
   editingRecordId = recordId;
-  document.getElementById('editState').textContent = '当前：编辑模式（已选中1条工单）';
+  document.getElementById('editState').textContent = '当前：编辑模式（保存后会更新该工单）';
   fillForm(ticket);
-  window.scrollTo({top: document.body.scrollHeight * 0.25, behavior: 'smooth'});
+  window.scrollTo({top: 0, behavior: 'smooth'});
 }
 
 async function onDelete(recordId){
@@ -508,6 +538,40 @@ async function onDelete(recordId){
   await api('/api/tickets/'+recordId, {method:'DELETE'});
   await Promise.all([loadTickets(), loadTopIssues()]);
   if (editingRecordId === recordId) resetForm();
+}
+
+async function showDetail(recordId){
+  const data = await api('/api/tickets/'+recordId);
+  currentDetail = data;
+  document.getElementById('detailCard').style.display = 'block';
+  document.getElementById('dRecordId').textContent = safe(data.recordId);
+  document.getElementById('dDate').textContent = safe(data.receivedDateRaw);
+  document.getElementById('dMeta').textContent = `${safe(data.productLine)} / ${safe(data.platform)}`;
+  document.getElementById('dState').textContent = `${safe(data.status)} / ${safe(data.priority)}`;
+  document.getElementById('dDesc').textContent = safe(data.description);
+  document.getElementById('dProgress').textContent = safe(data.progress);
+  document.getElementById('dConclusion').textContent = safe(data.conclusion);
+
+  const linkNode = document.getElementById('dLink');
+  if (isExternalUrl(data.ticketLink)) {
+    linkNode.innerHTML = `<a href="${data.ticketLink}" target="_blank" rel="noreferrer">${data.ticketLink}</a>`;
+    document.getElementById('openExternalBtn').disabled = false;
+  } else {
+    linkNode.textContent = '未配置外部链接（工单已在本系统可查看/编辑）';
+    document.getElementById('openExternalBtn').disabled = true;
+  }
+  document.getElementById('detailCard').scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+function openExternalTicket(){
+  if (currentDetail && isExternalUrl(currentDetail.ticketLink)) {
+    window.open(currentDetail.ticketLink, '_blank');
+  }
+}
+
+function editFromDetail(){
+  if (!currentDetail) return;
+  onEdit(currentDetail.recordId);
 }
 
 async function loadTopIssues(){
@@ -530,13 +594,7 @@ async function loadTopIssues(){
 
   const ctx = document.getElementById('issuesPie');
   if (pieChart) pieChart.destroy();
-  pieChart = new Chart(ctx, {
-    type: 'pie',
-    data: {
-      labels: data.pieChart.labels,
-      datasets: [{ data: data.pieChart.values }]
-    }
-  });
+  pieChart = new Chart(ctx, {type: 'pie', data: {labels: data.pieChart.labels, datasets: [{ data: data.pieChart.values }]}});
 }
 
 async function loadTickets(){
@@ -546,6 +604,7 @@ async function loadTickets(){
   tbody.innerHTML = '';
   ticketsCache.slice(0,300).forEach(t => {
     const tr = document.createElement('tr');
+    tr.className = 'clickable';
     tr.innerHTML = `
       <td>${safe(t.receivedDateRaw).slice(0,10)}</td>
       <td>${safe(t.productLine)}</td>
@@ -554,10 +613,11 @@ async function loadTickets(){
       <td>${safe(t.status)}</td>
       <td>
         <div class="actions">
-          <button class="secondary" onclick="onEdit('${safe(t.recordId)}')">编辑</button>
-          <button class="danger" onclick="onDelete('${safe(t.recordId)}')">删除</button>
+          <button class="secondary" onclick="event.stopPropagation(); onEdit('${safe(t.recordId)}')">编辑</button>
+          <button class="danger" onclick="event.stopPropagation(); onDelete('${safe(t.recordId)}')">删除</button>
         </div>
       </td>`;
+    tr.addEventListener('click', () => showDetail(t.recordId));
     tbody.appendChild(tr);
   });
 }
@@ -621,24 +681,17 @@ class TicketAPIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/tickets/normalized":
             raw_payload = self.client.list_records()
             records = _extract_records(raw_payload)
-            out = []
+            self._send(200, {"records": [_normalize_record(record) for record in records]})
+            return
+        if parsed.path.startswith("/api/tickets/"):
+            record_id = parsed.path.rsplit("/", 1)[-1]
+            raw_payload = self.client.list_records()
+            records = _extract_records(raw_payload)
             for record in records:
-                fields = record.get("fields") if isinstance(record.get("fields"), dict) else {}
-                out.append(
-                    {
-                        "recordId": record.get("recordId", ""),
-                        "productLine": _get_field(fields, ["产品线", "productLine", "产品", "业务线"]),
-                        "receivedDateRaw": _get_field(fields, ["问题接收日期", "接收日期", "日期", "创建时间"]),
-                        "description": _get_field(fields, ["问题描述", "描述", "summary", "标题"]),
-                        "platform": _get_field(fields, ["所属端", "端", "平台", "app端"]),
-                        "status": _get_field(fields, ["状态", "status"]),
-                        "priority": _get_field(fields, ["优先级", "priority"]),
-                        "progress": _get_field(fields, ["处理进展", "进展", "处理状态"]),
-                        "conclusion": _get_field(fields, ["问题结论", "结论", "原因"]),
-                        "ticketLink": _get_field(fields, ["工单链接", "链接", "ticketLink", "url"]),
-                    }
-                )
-            self._send(200, {"records": out})
+                if record.get("recordId") == record_id:
+                    self._send(200, _normalize_record(record))
+                    return
+            self._send(404, {"message": "Ticket not found"})
             return
         if parsed.path == "/api/analytics/top-issues":
             query = parse_qs(parsed.query)
