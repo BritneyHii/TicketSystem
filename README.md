@@ -1,81 +1,98 @@
-# TicketSystem Sync API
+# TicketSystem App（Fusion 工单同步 + Top 问题分析）
 
-一个轻量级 Python API 服务：把你自己的 App 操作直接同步到 Fusion 工单表（Datasheet），避免手动维护表格。
+这是一个可直接运行的 Python Web App：
 
-## 功能
+- **把 Fusion 表当数据库**（不再手动改表）
+- 在页面里**新增/更新/删除工单**，自动同步到线上工单表
+- 自动做每周 **Top 相似问题分析**（支持日期和产品线筛选）
+- 展示问题工单占比与饼图
 
-- `GET /api/tickets`：读取工单列表
-- `POST /api/tickets`：新增工单
-- `PATCH /api/tickets/:recordId`：更新工单
-- `DELETE /api/tickets/:recordId`：删除工单
-- `GET /health`：健康检查
+> Fusion 接口来自你提供的 curl：
+> `GET /fusion/v1/datasheets/{datasheetId}/records?viewId=...&fieldKey=name`
 
-所有接口会实时调用 Fusion OpenAPI，因此工单系统表就是唯一数据源。
+---
 
-## 快速开始
+## 1) 配置
 
-1. 准备环境变量
+创建环境变量：
 
 ```bash
 cp .env.example .env
+export $(cat .env | xargs)
 ```
 
-然后编辑 `.env`，填入你的 token。
+核心配置：
 
-2. 启动
+- `FUSION_TOKEN`：访问 token（必填）
+- `FUSION_BASE_URL`：默认 `https://yach-vika.zhiyinlou.com/fusion/v1`
+- `FUSION_DATASHEET_ID`：默认 `dstjpwCCYCubQ53M9M`
+- `FUSION_VIEW_ID`：默认 `viw1vsFKMMcvp`
+- `FUSION_FIELD_KEY`：默认 `name`
+
+---
+
+## 2) 启动
 
 ```bash
-export $(cat .env | xargs)
 python3 app.py
 ```
 
-默认地址：`http://localhost:8080`
+打开：`http://localhost:8080`
 
-## 请求示例
+---
 
-### 查询工单
+## 3) 页面功能
 
-```bash
-curl "http://localhost:8080/api/tickets"
-```
+### 工单维护（同步 Fusion）
 
-### 新增工单
+- 友好表单录入（不需要手写 JSON）
+- 工单列表行内“编辑/删除”（不需要手动输入 recordId）
+- 支持录入：问题接收日期、产品线、所属端、优先级、状态、问题描述、处理进展、问题结论
+- 创建时自动新增工单，不需要手填工单链接
+- 点击工单行可打开“工单详情”，并可一键跳转外部工单链接（如果该工单已有链接）
+- 保存后自动同步到 Fusion
 
-```bash
-curl -X POST "http://localhost:8080/api/tickets" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "fields": {
-      "标题": "登录报错",
-      "优先级": "高",
-      "状态": "待处理"
-    }
-  }'
-```
+### 每周 Top 问题分析
 
-### 更新工单
+可筛选：
 
-```bash
-curl -X PATCH "http://localhost:8080/api/tickets/recxxxxxxxx" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "fields": {
-      "状态": "处理中"
-    }
-  }'
-```
+- 问题接收日期（开始/结束）
+- 产品线关键字（例如 `online`、`大小班`）
+- 最小工单数阈值（默认 ≥2）
 
-### 删除工单
+输出内容：
 
-```bash
-curl -X DELETE "http://localhost:8080/api/tickets/recxxxxxxxx"
-```
+- 简洁问题描述
+- 工单数
+- 所属端
+- 在筛选范围内占比
+- 工单链接
+- 饼图
 
-## 建议接入方式
+相似问题识别逻辑基于：
 
-你可以把这个服务当作“中间层 API”：
+- 问题描述
+- 处理进展
+- 问题结论
 
-- 前端 App / 小程序 / 管理后台只访问本服务；
-- 本服务再访问 Fusion 表；
-- 后续若要加权限、字段映射、流程控制，只改本服务即可。
+并用 Jaccard 文本相似度自动聚类。
 
+---
+
+## 4) API（可单独接入）
+
+- `GET /health`：健康检查
+- `GET /api/tickets`：读取 Fusion 原始工单
+- `GET /api/tickets/normalized`：读取标准化后的工单关键字段
+- `GET /api/tickets/:recordId`：读取单条工单详情（用于详情面板）
+- `POST /api/tickets`：新增工单
+- `PATCH /api/tickets/:recordId`：更新工单
+- `DELETE /api/tickets/:recordId`：删除工单
+- `GET /api/analytics/top-issues?startDate=2026-01-01&endDate=2026-01-07&productLine=online&minCount=2`
+
+---
+
+## 5) 说明
+
+- 本项目是纯 Python 标准库实现（后端）+ 浏览器端 Chart.js（前端图表）。
+- 若你后续要做权限体系、字段映射、自动派单等，可以继续在这个 App 上扩展。
